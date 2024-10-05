@@ -74,7 +74,3 @@ Below is an example of how the bot interacts with the user. The screenshot `img.
 ## License
 
 This project is licensed under the MIT License.
-
-## License
-
-This project is licensed under the MIT License.
