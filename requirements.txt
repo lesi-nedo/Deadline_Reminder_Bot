@@ -1,0 +1,6 @@
+# This project was built using Python 3.12.3
+
+python-telegram-bot==21.6
+python-telegram-bot[job-queue]==21.6
+python-dotenv==1.0.1
+urllib3==2.2.3
