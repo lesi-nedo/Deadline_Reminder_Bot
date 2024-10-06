@@ -1,4 +1,5 @@
 import os
+import sys
 import urllib3
 import json
 import logging
@@ -6,11 +7,14 @@ import logging
 
 from urllib3.exceptions import HTTPError, MaxRetryError, NewConnectionError
 from datetime import datetime, date, time
+
 from telegram import Update
 from telegram.constants import ChatAction, ParseMode
 from telegram.ext import filters, ApplicationBuilder, CommandHandler, ContextTypes, MessageHandler
+from telegram.error import ChatMigrated
+
 from dotenv import load_dotenv
-from typing import Union, Dict, Any, cast
+from typing import Union, cast
 
 from PersonalFilters import PersonalFilters
 
@@ -27,7 +31,16 @@ logging.basicConfig(
 # Create a logger instance
 logger = logging.getLogger(__name__)
 # Load environment variables
-load_dotenv()
+env_file = sys.argv[1] if len(sys.argv) > 1 else None
+if env_file and os.path.isfile(sys.argv[1]):
+    logger.info(f"Loading environment variables from: {sys.argv[1]}")
+    load_dotenv(sys.argv[1])
+else:
+    if env_file:
+        logger.info("The file name provided does not exist. Trying to load the default '.env' file.")
+    else:
+        logger.info("No file name provided. Trying to load the default .env file.")
+    load_dotenv()
 
 # Get the bot token and chat ID from environment variables
 TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
@@ -71,6 +84,21 @@ async def set_deadline(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     except (IndexError, ValueError):
         await update.message.reply_text("Please use the format: /setdeadline YYYY-MM-DD")
 
+
+async def _send_message(context: ContextTypes.DEFAULT_TYPE, message: str, parseMode:ParseMode=ParseMode.MARKDOWN_V2) -> None:
+    global CHAT_ID
+    try:
+        await context.bot.send_message(chat_id=CHAT_ID, text=message, parse_mode=parseMode)
+    except ChatMigrated as e:
+        logger.error("Chat migrated: %s", e)
+        new_chat_id = e.new_chat_id
+        logger.info("New chat ID: %s", new_chat_id)
+
+        CHAT_ID = new_chat_id
+
+        await context.bot.send_message(chat_id=CHAT_ID, text=message, parse_mode=parseMode)
+
+
 async def send_reminder(context: ContextTypes.DEFAULT_TYPE) -> None:
     days_left = (DEADLINE - date.today()).days
     if days_left > 0:
@@ -83,7 +111,7 @@ async def send_reminder(context: ContextTypes.DEFAULT_TYPE) -> None:
     else:
         message = f"🚨 *The deadline has passed by* _{abs(days_left)}_ *days❗️* ⏳"
 
-    await context.bot.send_message(chat_id=CHAT_ID, text=message, parse_mode=ParseMode.MARKDOWN_V2)
+    await _send_message(context, message)
 
 async def manual_reminder(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await send_reminder(context)
@@ -93,11 +121,8 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     text = "❌ \\- *Response not supported*"
 
-    await context.bot.send_message(
-        chat_id=update.effective_chat.id,
-        text=text,
-        parse_mode=ParseMode.MARKDOWN_V2
-    )
+    await _send_message(context, text)
+
 
 def send_request(http: urllib3.PoolManager, url: str) -> Union[None, list]:
     headers = {
@@ -114,7 +139,7 @@ def send_request(http: urllib3.PoolManager, url: str) -> Union[None, list]:
             json_data = json.loads(data)
             return json_data
         else:
-            logger.error("Failed to retrieve collaborators with status: %s", response.status)
+            logger.error("Failed to retrieve collaborators with status: %s--%s", response.status, response.data)
 
     except MaxRetryError as e:
         logger.error("Failed to retrieve collaborators: %s", e)
@@ -171,7 +196,6 @@ def get_commits(http: urllib3.PoolManager, collaborators: list) -> dict:
     return stats
 
 async def send_stats(context: ContextTypes.DEFAULT_TYPE) -> None:
-    logger.info(f"Sending stats... {context}")
     stats = context.job.data['stats']
     message = "📊 *Daily Stats* 📈\n\n\n"
     for collaborator, data in stats.items():
@@ -181,7 +205,7 @@ async def send_stats(context: ContextTypes.DEFAULT_TYPE) -> None:
                    f"🟢 *Additions:*   `{data['deletions_additions']['additions']}`\n\n\n")
 
 
-    await context.bot.send_message(chat_id=CHAT_ID, text=message, parse_mode=ParseMode.MARKDOWN_V2)
+    await _send_message(context, message)
 
 def main() -> None:
     http = urllib3.PoolManager()
@@ -196,7 +220,7 @@ def main() -> None:
             logger.info("No commits found.")
     # Build the application with the job queue
 
-
+    logger.info(f"[INFO] Starting the Bot with token: {TOKEN}")
     application = ApplicationBuilder().token(TOKEN).build()
 
     # personal_filter = PersonalFilters()
@@ -212,12 +236,16 @@ def main() -> None:
     application.add_handler(response_handler)
 
     # Schedule the daily reminder
-    #application.job_queue.run_daily(send_reminder, time=time(hour=9, minute=0, second=0))
-    application.job_queue.run_once(send_reminder, when=0)
+
+    # application.job_queue.run_once(send_reminder, when=0)
+    # UTC time
+    application.job_queue.run_daily(send_reminder, time=time(hour=7, minute=0, second=0))
+
     if collaborators:
-        application.job_queue.run_once(send_stats, when=0, data={'stats': stats})
+        # application.job_queue.run_once(send_stats, when=0, data={'stats': stats})
+        application.job_queue.run_daily(send_stats, time=time(hour=21, minute=0, second=0), data={'stats': stats})
     # Start the Bot
-    application.run_polling(allowed_updates=Update.ALL_TYPES)
+    application.run_polling(poll_interval=43200)
 
 if __name__ == '__main__':
     main()
