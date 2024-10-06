@@ -11,6 +11,7 @@ ITEMS_TO_TRANSFER=(
   "PersonalFilters.py"
   "deadline_bot.py"
   "requirements.txt"
+  "set_crontab_tasks.sh"
 )
 
 RSYNC_OPTIONS=(

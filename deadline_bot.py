@@ -1,5 +1,7 @@
+import asyncio
 import os
 import sys
+
 import urllib3
 import json
 import logging
@@ -8,7 +10,7 @@ import logging
 from urllib3.exceptions import HTTPError, MaxRetryError, NewConnectionError
 from datetime import datetime, date, time
 
-from telegram import Update
+from telegram import Update, Bot
 from telegram.constants import ChatAction, ParseMode
 from telegram.ext import filters, ApplicationBuilder, CommandHandler, ContextTypes, MessageHandler
 from telegram.error import ChatMigrated
@@ -16,7 +18,6 @@ from telegram.error import ChatMigrated
 from dotenv import load_dotenv
 from typing import Union, cast
 
-from PersonalFilters import PersonalFilters
 
 
 # Configure the logging
@@ -41,6 +42,28 @@ else:
     else:
         logger.info("No file name provided. Trying to load the default .env file.")
     load_dotenv()
+
+CRON_TYPE = ""
+
+
+def _check_cron_args():
+    if not sys.argv[2] == 'cron':
+        logger.error("Second argument allowed is 'cron'.")
+        exit(1)
+    try:
+        if not sys.argv[3] == 'reminder' and not sys.argv[3] == 'stats':
+            logger.error("Please provide a valid argument for the cron job. ['reminder' or 'stats']")
+            exit(1)
+    except IndexError:
+        logger.error("Please provide a valid argument for the cron job. ['reminder' or 'stats']")
+        exit(1)
+    global CRON_TYPE
+    CRON_TYPE = sys.argv[3]
+
+if len(sys.argv) > 2:
+    _check_cron_args()
+
+
 
 # Get the bot token and chat ID from environment variables
 TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
@@ -71,6 +94,8 @@ if not DEADLINE:
     exit(1)
 
 
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(
         "Hello! I'm your deadline reminder bot. Use /setdeadline YYYY-MM-DD to set a new deadline.")
@@ -85,10 +110,10 @@ async def set_deadline(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         await update.message.reply_text("Please use the format: /setdeadline YYYY-MM-DD")
 
 
-async def _send_message(context: ContextTypes.DEFAULT_TYPE, message: str, parseMode:ParseMode=ParseMode.MARKDOWN_V2) -> None:
+async def _send_message(bot: Bot, message: str, parseMode:ParseMode=ParseMode.MARKDOWN_V2) -> None:
     global CHAT_ID
     try:
-        await context.bot.send_message(chat_id=CHAT_ID, text=message, parse_mode=parseMode)
+        await bot.send_message(chat_id=CHAT_ID, text=message, parse_mode=parseMode)
     except ChatMigrated as e:
         logger.error("Chat migrated: %s", e)
         new_chat_id = e.new_chat_id
@@ -96,22 +121,25 @@ async def _send_message(context: ContextTypes.DEFAULT_TYPE, message: str, parseM
 
         CHAT_ID = new_chat_id
 
-        await context.bot.send_message(chat_id=CHAT_ID, text=message, parse_mode=parseMode)
+        await bot.send_message(chat_id=CHAT_ID, text=message, parse_mode=parseMode)
 
-
-async def send_reminder(context: ContextTypes.DEFAULT_TYPE) -> None:
+def _create_reminder_message() -> str:
     days_left = (DEADLINE - date.today()).days
     if days_left > 0:
         message = (f"⏰ *Reminder:* `{days_left}` days left until the deadline❗️\n"
                    "⏳ Time is ticking\\.\\.\\.\n"
-                  f"📅 Deadline: `{DEADLINE}`\n"
+                   f"📅 Deadline: `{DEADLINE}`\n"
                    "We got this\\! 💪\n")
     elif days_left == 0:
         message = "⚠️ *Today is the deadline❗️* ⏰"
     else:
         message = f"🚨 *The deadline has passed by* _{abs(days_left)}_ *days❗️* ⏳"
 
-    await _send_message(context, message)
+    return message
+async def send_reminder(context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = _create_reminder_message()
+
+    await _send_message(context.bot, message)
 
 async def manual_reminder(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await send_reminder(context)
@@ -121,7 +149,7 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     text = "❌ \\- *Response not supported*"
 
-    await _send_message(context, text)
+    await _send_message(context.bot, text)
 
 
 def send_request(http: urllib3.PoolManager, url: str) -> Union[None, list]:
@@ -195,19 +223,24 @@ def get_commits(http: urllib3.PoolManager, collaborators: list) -> dict:
 
     return stats
 
-async def send_stats(context: ContextTypes.DEFAULT_TYPE) -> None:
-    stats = context.job.data['stats']
+def _create_stats_message(stats: dict) -> str:
     message = "📊 *Daily Stats* 📈\n\n\n"
     for collaborator, data in stats.items():
         message += (f"👤 *Collaborator:*   `{collaborator}`\n"
-                   f"📊 *Commits:*   `{data['commits']}`\n"
-                   f"🔴 *Deletions:*   `{data['deletions_additions']['deletions']}`\n"
-                   f"🟢 *Additions:*   `{data['deletions_additions']['additions']}`\n\n\n")
+                    f"📊 *Commits:*   `{data['commits']}`\n"
+                    f"🔴 *Deletions:*   `{data['deletions_additions']['deletions']}`\n"
+                    f"🟢 *Additions:*   `{data['deletions_additions']['additions']}`\n\n\n")
+
+    return message
 
 
-    await _send_message(context, message)
+async def send_stats(context: ContextTypes.DEFAULT_TYPE) -> None:
+    stats = context.job.data['stats']
 
-def main() -> None:
+    message = _create_stats_message(stats)
+
+    await _send_message(context.bot, message)
+def _main_helper():
     http = urllib3.PoolManager()
     stats = {}
 
@@ -221,6 +254,10 @@ def main() -> None:
     # Build the application with the job queue
 
     logger.info(f"[INFO] Starting the Bot with token: {TOKEN}")
+    return collaborators, stats
+def main_app() -> None:
+    collaborators, stats = _main_helper()
+
     application = ApplicationBuilder().token(TOKEN).build()
 
     # personal_filter = PersonalFilters()
@@ -247,5 +284,19 @@ def main() -> None:
     # Start the Bot
     application.run_polling(poll_interval=43200)
 
+def main_cron():
+    collaborators, stats = _main_helper()
+    bot = Bot(token=TOKEN)
+    if CRON_TYPE == 'reminder':
+        messages_rem = _create_reminder_message()
+        asyncio.run(_send_message(bot, messages_rem))
+    else:
+        message_stats = _create_stats_message(stats)
+        asyncio.run(_send_message(bot, message_stats))
+
+
 if __name__ == '__main__':
-    main()
+    if not CRON_TYPE:
+        main_app()
+    else:
+        main_cron()
